@@ -1,0 +1,6 @@
+task2/cifar10_vit.pth
+task1/mnist_cnn.pth
+task1/data
+task2/data
+*/data
+*.pth
