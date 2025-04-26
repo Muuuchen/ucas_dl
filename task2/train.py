@@ -8,7 +8,7 @@ from tqdm import tqdm
 import os
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
-
+from typing import Tuple
 transform_train = transforms.Compose([
     transforms.RandomResizedCrop(224),  
     transforms.RandomHorizontalFlip(),
@@ -43,22 +43,126 @@ testloader = torch.utils.data.DataLoader(testset, batch_size=256,
                                         shuffle=False, num_workers=16,
                                         sampler=test_sampler)
 
-class ViTForCIFAR10(nn.Module):
-    def __init__(self):
-        super(ViTForCIFAR10, self).__init__()
-        self.vit = VisionTransformer(
-            image_size=224,
-            patch_size=16,
-            num_layers=6,
-            num_heads=8,
-            hidden_dim=256,
-            mlp_dim=512,
-            num_classes=10
-        )
+class MHA(nn.Module):
+    def __init__(self,embed_dim, num_heads):
+        super().__init__()
+        assert embed_dim % num_heads == 0, "embed_dim must be divisible by num_heads"
+        self.embedim = self.embed_dim
+        self.num_heads = num_heads
+        self.head_dim = embed_dim // num_heads
+        self.qkv_proj = nn.Linear(embed_dim, embed_dim * 3)
+        self.out_proj = nn.Linear(embed_dim, embed_dim)
+        self.scale = (self.head_dim) ** -0.5
+        
+    def forward(self,x:torch.Tensor):
+        B, S, E = x.shape
+        qkv =self.qkv_proj(x).reshape(B,S,3,self.num_heads, self.head_dim).permute(2,0,3,1,4)
+        q, k, v = qkv[0], qkv[1], qkv[2] # B num_head, S, E
+        attn = (q @ k.transpose(-1, -2)) *self.scale # B, num_heads, S,S 
+        attn = attn.softmax(dim=-1)
+        x = (attn @ v).transpose(1,2).reshape(B,S,E)
+        x = self.out_proj(x)
+        return x
+class Transformer(nn.Module):
+    def __init__(self,dim,
+                 depth,
+                 num_heads,
+                 dim_head,
+                 mlp_dim,
+                 dropout=0.):
+        super().__init__()
+        self.norm = nn.LayerNorm(dim)
+        self.layers = nn.ModuleList([])
+        for _ in range(depth):
+            self.layers.append(nn.ModuleList([
+                MHA(dim, embed_dim=num_heads*dim_head ,num_heads=num_heads),
+                MLP(dim,mlp_dim, dropout=dropout)
+            ]))
+            
+    def forward(self,x):
+        for attn, mlp in self.layers:
+            x = x + attn(self.norm(x))
+            x = x + mlp(self.norm(x))
+        return self.norm(x)  
     
-    def forward(self, x):
-        return self.vit(x)
+    
+class MLP(nn.Module):
+    def __init__(self, dim,hidden_dim, dropout=0.):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.LayerNorm(dim),
+            nn.Linear(dim, hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, dim),
+            nn.Dropout(dropout))
+    def forward(self,x):
+        x = self.net(x)
+        return x
 
+class ViTForCIFAR10(nn.Module):
+    def __init__(self, *,
+                 image_size:Tuple[int, int],
+                 patch_size:Tuple[int,int],
+                 num_classe:int,
+                 dim,
+                 depth,
+                 num_heads,
+                 mlp_dim,
+                 pool = 'cls',
+                 channels=3,
+                 dim_head = 64,
+                 dropout=0.,
+                 embed_dropout = 0.,
+                 ):
+        super(ViTForCIFAR10, self).__init__()
+        image_height, image_width = image_size
+        self.patch_height, self.patch_width = patch_size
+        assert image_height % self.patch_height == 0, "image_height must be divisible by patch_height"
+        assert image_width % self.patch_height == 0, "image_weight must be divisible by patch_height"
+        self.num_patch_height  = image_height // self.patch_height
+        self.num_patch_width = image_width // self.patch_width
+        self.num_patches = (image_height // self.patch_height) * (image_width // self.patch_width)
+        patch_dim = channels*self.patch_height*self.patch_width
+        self.channels = channels
+        assert pool in ['cls', 'mean'], "pool must be either cls or mean"
+        self.to_patch_embedding = nn.Sequential(
+            nn.LayerNorm(patch_dim),
+            nn.Linear(patch_dim, dim),
+            nn.LayerNorm(dim)
+        )
+        self.pos_embedding = nn.Parameter(torch.randn(1, self.num_patches+1, dim))
+        self.cls_token = nn.Parameter(torch.randn(1, 1, dim))
+        self.dropout = nn.Dropout(embed_dropout)
+
+        self.transformer = Transformer(dim=dim,
+                                       depth=depth,
+                                        num_heads=num_heads,
+                                        dim_head=dim_head,
+                                        mlp_dim=mlp_dim,
+                                        dropout=dropout)
+        self.pool = pool
+        self.to_latent = nn.Identity()
+        self.mlp_head = nn.Linear(dim,num_classe)
+
+
+    def forward(self,x):
+        batch_size, C, H,W = x.shape
+        x = x.reshape(
+            batch_size,C,  
+            self.num_patch_height, self.patch_height, 
+            self.num_patch_width,self.patch_width).permute(
+                0,2,4,3,5,1).reshape(
+                    batch_size,
+                    self.num_patch_height*self.num_patch_width,
+                    self.patch_height*self.patch_width*C
+                )
+
+        b,n,e=x.shape
+        cls_tokens = torch.repeat_interleave(cls_tokens, batch_size, 0)
+        
+        self.to_patch_embedding(x)
+        
 model = ViTForCIFAR10().to(device)
 model = DDP(model, device_ids=[local_rank])
 model = torch.compile(model) 
