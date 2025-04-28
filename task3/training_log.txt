@@ -1,0 +1,5 @@
+Final Loss: 4.0101
+Best Loss: 4.0101
+Training History:
+Epoch 1: Loss=7.8952, LR=0.000340
+Epoch 2: Loss=4.0101, LR=0.000670
