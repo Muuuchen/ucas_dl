@@ -262,6 +262,23 @@ def train_model(device): # Added device parameter
                   f'Loss: {avg_loss:.4f} - '
                   f'LR: {optimizer.param_groups[0]["lr"]:.6f} - '
                   f'Best Loss: {history["best_loss"]:.4f}')
+                  
+            # Generate a poem after each epoch to see model progress
+            print(f"\n------ Generated Poem (Epoch {epoch+1}) ------")
+            # Save current training mode
+            was_training = model.training
+            # Set to eval mode for generation
+            model.eval()
+            # Use a fixed starting phrase for consistency across epochs
+            start_words = "春风又绿江南岸"
+            # Generate poem using current model state
+            gen_model = model.module if world_size > 1 else model
+            poem = generate_poetry(gen_model, start_words, ix2word, word2ix, device)
+            print(poem)
+            print("------------------------------------\n")
+            # Restore previous training mode
+            if was_training:
+                model.train()
         # --- End Rank 0 Operations ---
 
         # All processes check for early stopping signal
